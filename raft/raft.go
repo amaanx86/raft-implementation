@@ -8,6 +8,7 @@
 package raft
 
 import (
+	"fmt"
 	"log"
 	"math/rand"
 	"net"
@@ -332,11 +333,19 @@ func (n *Node) handleAppendEntries(args *AppendEntriesArgs, reply *AppendEntries
 		n.entries = append(n.entries, args.Entries[i:]...)
 		break
 	}
+	if len(args.Entries) > 0 {
+		n.logger.Printf("node %d follower: appended %d entries from leader %d prev=%d (log_len=%d)",
+			n.id, len(args.Entries), args.LeaderID, args.PrevLogIndex, len(n.entries)-1)
+	}
 
 	// advance commit index, but never beyond what we have locally
 	if args.LeaderCommit > n.commitIndex {
 		last := len(n.entries) - 1
+		prevCommit := n.commitIndex
 		n.commitIndex = min(args.LeaderCommit, last)
+		if n.commitIndex > prevCommit {
+			n.logger.Printf("node %d follower: commit advanced %d -> %d", n.id, prevCommit, n.commitIndex)
+		}
 		n.applyCommittedLocked()
 	}
 
@@ -384,6 +393,11 @@ func (n *Node) replicateTo(peerID, term int) {
 		Entries:      entries,
 		LeaderCommit: n.commitIndex,
 	}
+	// only log real replication, not empty heartbeats, so the trace stays useful
+	if len(entries) > 0 {
+		n.logger.Printf("node %d leader: replicate to peer %d entries=%d prev=%d commit=%d",
+			n.id, peerID, len(entries), prevIdx, n.commitIndex)
+	}
 	n.mu.Unlock()
 
 	reply := &AppendEntriesReply{}
@@ -410,6 +424,8 @@ func (n *Node) replicateTo(peerID, term int) {
 	if n.nextIndex[peerID] > 1 {
 		n.nextIndex[peerID]--
 	}
+	n.logger.Printf("node %d leader: peer %d rejected, nextIndex backed off to %d",
+		n.id, peerID, n.nextIndex[peerID])
 }
 
 // advancecommitlocked moves commitindex forward to the largest index
@@ -417,6 +433,7 @@ func (n *Node) replicateTo(peerID, term int) {
 func (n *Node) advanceCommitLocked() {
 	last := len(n.entries) - 1
 	majority := (len(n.peers)+1)/2 + 1
+	prevCommit := n.commitIndex
 	for N := n.commitIndex + 1; N <= last; N++ {
 		// safety rule: never commit entries from prior terms by counting
 		if n.entries[N].Term != n.currentTerm {
@@ -432,21 +449,44 @@ func (n *Node) advanceCommitLocked() {
 			n.commitIndex = N
 		}
 	}
+	if n.commitIndex > prevCommit {
+		n.logger.Printf("node %d leader: commit advanced %d -> %d", n.id, prevCommit, n.commitIndex)
+	}
 	n.applyCommittedLocked()
 }
 
 // applycommittedlocked feeds committed log entries into the state
-// machine in order and wakes any waiters.
+// machine in order and wakes any waiters. it logs every mutation
+// so the lab demo shows the full create/update/delete trace.
 func (n *Node) applyCommittedLocked() {
 	for n.lastApplied < n.commitIndex {
 		n.lastApplied++
 		cmd := n.entries[n.lastApplied].Command
-		n.kv.Apply(cmd.Op, cmd.Key, cmd.Value)
+		prev, existed := n.kv.Apply(cmd.Op, cmd.Key, cmd.Value)
+		n.logger.Printf("node %d apply idx=%d %s", n.id, n.lastApplied, describeApply(cmd, prev, existed))
 		if ch, ok := n.applyNotifs[n.lastApplied]; ok {
 			close(ch)
 			delete(n.applyNotifs, n.lastApplied)
 		}
 	}
+}
+
+// describeapply turns a committed command and the prior store state
+// into a short human-readable phrase like `created key="foo" value="bar"`.
+func describeApply(cmd Command, prev string, existed bool) string {
+	switch cmd.Op {
+	case "set":
+		if existed {
+			return fmt.Sprintf("updated key=%q value=%q (was %q)", cmd.Key, cmd.Value, prev)
+		}
+		return fmt.Sprintf("created key=%q value=%q", cmd.Key, cmd.Value)
+	case "del":
+		if existed {
+			return fmt.Sprintf("deleted key=%q (was %q)", cmd.Key, prev)
+		}
+		return fmt.Sprintf("delete miss key=%q", cmd.Key)
+	}
+	return fmt.Sprintf("unknown op=%q key=%q", cmd.Op, cmd.Key)
 }
 
 // submit appends a command to the leader's log. it returns the log
@@ -464,6 +504,7 @@ func (n *Node) Submit(cmd Command) (int, bool) {
 	for id := range n.peers {
 		peerIDs = append(peerIDs, id)
 	}
+	n.logger.Printf("node %d leader: append idx=%d op=%s key=%q", n.id, idx, cmd.Op, cmd.Key)
 	n.mu.Unlock()
 
 	// nudge replication right away rather than waiting for the next heartbeat
@@ -504,9 +545,11 @@ func (n *Node) Get(key string) (value string, found, isLeader bool) {
 	leader := n.state == Leader
 	n.mu.Unlock()
 	if !leader {
+		n.logger.Printf("node %d read key=%q rejected (not leader)", n.id, key)
 		return "", false, false
 	}
 	v, ok := n.kv.Get(key)
+	n.logger.Printf("node %d leader: read key=%q found=%v", n.id, key, ok)
 	return v, ok, true
 }
 

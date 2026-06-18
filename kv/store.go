@@ -26,17 +26,21 @@ func (s *Store) Get(key string) (string, bool) {
 	return v, ok
 }
 
-// apply mutates the store based on a committed command.
+// apply mutates the store based on a committed command. it returns
+// the prior value and whether the key existed before the mutation,
+// so the caller can log a precise create/update/delete event.
 // raft guarantees this is called in log order on every node.
-func (s *Store) Apply(op, key, value string) {
+func (s *Store) Apply(op, key, value string) (prev string, existed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	prev, existed = s.data[key]
 	switch op {
 	case "set":
 		s.data[key] = value
 	case "del":
 		delete(s.data, key)
 	}
+	return prev, existed
 }
 
 // snapshot returns a copy of the current data, useful for debugging.
