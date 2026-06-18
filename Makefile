@@ -56,8 +56,8 @@ status: ## print the status of each running node
 		echo; \
 	done
 
-logs: ## tail the background cluster logs
-	@tail -F $(LOG_DIR)/n1.log $(LOG_DIR)/n2.log $(LOG_DIR)/n3.log
+logs: ## tail the background cluster logs as one merged stream
+	@tail -q -F $(LOG_DIR)/n1.log $(LOG_DIR)/n2.log $(LOG_DIR)/n3.log
 
 # demo writes a couple of keys to the current leader. it asks every
 # node who they are, then sends writes to whichever one is leader.
