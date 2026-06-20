@@ -10,6 +10,8 @@
 
 ---
 
+For the full project writeup, with diagrams, screenshots, and references, see [docs/Raft Consensus Implementation.md](docs/Raft%20Consensus%20Implementation.md).
+
 In Scope: Leader election, log replication, safety rules, state machine apply.
 
 Out of Scope: Disk persistence, snapshots, membership changes, pre-vote, log compaction, client redirects.
